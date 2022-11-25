@@ -194,27 +194,27 @@ const NotDeployed = "Not Deployed"
 func (impl AppListingServiceImpl) FetchAllDevtronManagedApps() ([]AppNameTypeIdContainer, error) {
 	impl.Logger.Debug("reached at FetchAllDevtronManagedApps:")
 	apps := make([]AppNameTypeIdContainer, 0)
-	res, err := impl.appListingRepository.FetchAllActiveDevtronAppsWithAppIdAndName()
+	res, err := impl.appRepository.FetchAllActiveDevtronAppsWithAppIdAndName()
 	if err != nil {
 		impl.Logger.Errorw("failed to fetch devtron apps", "err", err)
 		return nil, err
 	}
 	for _, r := range res {
 		appContainer := AppNameTypeIdContainer{
-			AppId:   r.AppId,
+			AppId:   r.Id,
 			AppName: r.AppName,
 			Type:    "devtron-app",
 		}
 		apps = append(apps, appContainer)
 	}
-	res, err = impl.appListingRepository.FetchAllActiveInstalledAppsWithAppIdAndName()
+	res, err = impl.appRepository.FetchAllActiveInstalledAppsWithAppIdAndName()
 	if err != nil {
 		impl.Logger.Errorw("failed to fetch devtron installed apps", "err", err)
 		return nil, err
 	}
 	for _, r := range res {
 		appContainer := AppNameTypeIdContainer{
-			AppId:   r.AppId,
+			AppId:   r.Id,
 			AppName: r.AppName,
 			Type:    "devtron-installed-app",
 		}
@@ -1481,12 +1481,6 @@ func (impl AppListingServiceImpl) FetchOtherEnvironment(appId int) ([]*bean.Envi
 		return envs, err
 	}
 	for _, env := range envs {
-		detail, err := impl.appListingRepository.FetchAppDetail(appId, env.EnvironmentId)
-		if err != nil {
-			impl.Logger.Errorw("unable to fetch app details", "appId", appId, "envId", env.EnvironmentId)
-			return envs, err
-		}
-		env.LastDeployed = detail.LastDeployedTime
 		envOverride, err := impl.envOverrideRepository.FindLatestChartForAppByAppIdAndEnvId(appId, env.EnvironmentId)
 		if err != nil && !errors2.IsNotFound(err) {
 			impl.Logger.Errorw("error in fetching latest chart by appId and envId", "err", err, "appId", appId, "envId", env.EnvironmentId)

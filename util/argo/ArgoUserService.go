@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"github.com/argoproj/argo-cd/v2/pkg/apiclient/account"
-	"github.com/argoproj/argo-cd/v2/util/settings"
 	"github.com/devtron-labs/authenticator/client"
 	"github.com/devtron-labs/devtron/client/argocdServer"
 	"github.com/devtron-labs/devtron/client/argocdServer/session"
@@ -47,24 +46,23 @@ type ArgoUserService interface {
 type ArgoUserServiceImpl struct {
 	logger              *zap.SugaredLogger
 	clusterService      cluster.ClusterService
-	acdSettings         *settings.ArgoCDSettings
 	devtronSecretConfig *util2.DevtronSecretConfig
 	runTimeConfig       *client.RuntimeConfig
 	gitOpsRepository    repository.GitOpsConfigRepository
+	acdConnection       argocdServer.ArgoCdConnection
 }
 
 func NewArgoUserServiceImpl(Logger *zap.SugaredLogger,
 	clusterService cluster.ClusterService,
-	acdSettings *settings.ArgoCDSettings,
 	devtronSecretConfig *util2.DevtronSecretConfig,
-	runTimeConfig *client.RuntimeConfig, gitOpsRepository repository.GitOpsConfigRepository) (*ArgoUserServiceImpl, error) {
+	runTimeConfig *client.RuntimeConfig, gitOpsRepository repository.GitOpsConfigRepository, acdConnection argocdServer.ArgoCdConnection) (*ArgoUserServiceImpl, error) {
 	argoUserServiceImpl := &ArgoUserServiceImpl{
 		logger:              Logger,
 		clusterService:      clusterService,
-		acdSettings:         acdSettings,
 		devtronSecretConfig: devtronSecretConfig,
 		runTimeConfig:       runTimeConfig,
 		gitOpsRepository:    gitOpsRepository,
+		acdConnection:       acdConnection,
 	}
 	if !runTimeConfig.LocalDevMode {
 		go argoUserServiceImpl.ValidateGitOpsAndGetOrUpdateArgoCdUserDetail()
@@ -300,14 +298,15 @@ func (impl *ArgoUserServiceImpl) createNewArgoCdUser(username, password string, 
 }
 
 func (impl *ArgoUserServiceImpl) createTokenForArgoCdUser(username, password string) (string, error) {
-	token, err := passwordLogin(impl.acdSettings, username, password)
+	token, err := impl.passwordLogin(username, password)
 	if err != nil {
 		impl.logger.Errorw("error in getting jwt token with username & password", "err", err)
 		return "", err
 	}
 	ctx := context.Background()
 	ctx = context.WithValue(ctx, "token", token)
-	acdConnection := argocdServer.GetConnection(token, impl.acdSettings)
+
+	acdConnection := impl.acdConnection.GetConnection(token)
 	accountServiceClient := account.NewAccountServiceClient(acdConnection)
 	acdToken, err := accountServiceClient.CreateToken(ctx, &account.CreateTokenRequest{
 		Name: username,
@@ -319,8 +318,8 @@ func (impl *ArgoUserServiceImpl) createTokenForArgoCdUser(username, password str
 	return acdToken.Token, nil
 }
 
-func passwordLogin(acdSettings *settings.ArgoCDSettings, username, password string) (string, error) {
-	serviceClient := session.NewSessionServiceClient(acdSettings)
+func (impl *ArgoUserServiceImpl) passwordLogin(username, password string) (string, error) {
+	serviceClient := session.NewSessionServiceClient(impl.acdConnection)
 	token, err := serviceClient.Create(context.Background(), username, password)
 	return token, err
 }

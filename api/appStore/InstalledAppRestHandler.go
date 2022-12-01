@@ -366,10 +366,10 @@ func (handler *InstalledAppRestHandlerImpl) FetchAppDetailsForInstalledApp(w htt
 		handler.Logger.Warnw("appName and envName not found - avoiding resource tree call", "app", appDetail.AppName, "env", appDetail.EnvironmentName)
 	}
 	if err != nil {
-		common.WriteJsonResp(w, err, appDetail, http.StatusNotFound)
-		//return
+		common.WriteJsonResp(w, err, appDetail, http.StatusOK)
+		return
 	}
-	//common.WriteJsonResp(w, nil, appDetail, http.StatusOK)
+	common.WriteJsonResp(w, nil, appDetail, http.StatusOK)
 }
 
 func (handler *InstalledAppRestHandlerImpl) fetchResourceTree(w http.ResponseWriter, r *http.Request, appDetail *bean2.AppDetailContainer) error {

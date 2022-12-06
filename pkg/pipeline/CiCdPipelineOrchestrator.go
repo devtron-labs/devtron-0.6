@@ -467,7 +467,7 @@ func (impl CiCdPipelineOrchestratorImpl) DeleteCiPipeline(pipeline *pipelineConf
 	if request.CiPipeline.ExternalCiConfig.Id != 0 {
 		err = impl.AddPipelineMaterialInGitSensor(materials)
 		if err != nil {
-			impl.logger.Errorf("error in saving pipelineMaterials in git sensor", "materials", materials, "err", err)
+			impl.logger.Errorw("error in saving pipelineMaterials in git sensor", "materials", materials, "err", err)
 			return err
 		}
 	}
@@ -662,7 +662,7 @@ func (impl CiCdPipelineOrchestratorImpl) CreateCiConf(createRequest *bean.CiConf
 			}
 			err = impl.ciPipelineHistoryService.SaveHistory(ciPipelineObject, pipelineMaterials, ciTemplateBean, repository4.TRIGGER_ADD)
 			if err != nil {
-				impl.logger.Errorw("error in saving history for ci pipeline")
+				impl.logger.Errorw("error in saving history for ci pipeline", "err", err)
 			}
 		} else {
 			ciTemplateBean := &bean2.CiTemplateBean{

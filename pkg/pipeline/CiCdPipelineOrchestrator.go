@@ -464,10 +464,12 @@ func (impl CiCdPipelineOrchestratorImpl) DeleteCiPipeline(pipeline *pipelineConf
 		materials = append(materials, pipelineMaterial)
 	}
 
-	err = impl.AddPipelineMaterialInGitSensor(materials)
-	if err != nil {
-		impl.logger.Errorf("error in saving pipelineMaterials in git sensor", "materials", materials, "err", err)
-		return err
+	if request.CiPipeline.ExternalCiConfig.Id != 0 {
+		err = impl.AddPipelineMaterialInGitSensor(materials)
+		if err != nil {
+			impl.logger.Errorf("error in saving pipelineMaterials in git sensor", "materials", materials, "err", err)
+			return err
+		}
 	}
 
 	err = impl.ciPipelineMaterialRepository.Update(tx, materials...)

@@ -179,7 +179,7 @@ type PipelineBuilderImpl struct {
 	CiPipelineHistoryService                        history.CiPipelineHistoryService
 	globalStrategyMetadataRepository                chartRepoRepository.GlobalStrategyMetadataRepository
 	globalStrategyMetadataChartRefMappingRepository chartRepoRepository.GlobalStrategyMetadataChartRefMappingRepository
-	deploymentConfig             *DeploymentServiceTypeConfig
+	deploymentConfig                                *DeploymentServiceTypeConfig
 }
 
 func NewPipelineBuilderImpl(logger *zap.SugaredLogger,
@@ -276,7 +276,7 @@ func NewPipelineBuilderImpl(logger *zap.SugaredLogger,
 		CiPipelineHistoryService:                        CiPipelineHistoryService,
 		globalStrategyMetadataRepository:                globalStrategyMetadataRepository,
 		globalStrategyMetadataChartRefMappingRepository: globalStrategyMetadataChartRefMappingRepository,
-		deploymentConfig:             deploymentConfig,
+		deploymentConfig:                                deploymentConfig,
 	}
 }
 
@@ -1195,7 +1195,6 @@ func (impl PipelineBuilderImpl) PatchRegexCiPipeline(request *bean.CiRegexPatchR
 	if err != nil {
 		return err
 	}
-
 	err = impl.ciCdPipelineOrchestrator.AddPipelineMaterialInGitSensor(materials)
 	if err != nil {
 		impl.logger.Errorf("error in saving pipelineMaterials in git sensor", "materials", materials, "err", err)

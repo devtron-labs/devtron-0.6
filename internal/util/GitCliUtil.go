@@ -112,7 +112,7 @@ func (impl *GitCliUtil) Clone(rootDir string, remoteUrl string, username string,
 		impl.logger.Warn("git fetch completed, pulling master branch data from remote origin")
 		response, errMsg, err = impl.ListBranch(rootDir, username, password)
 		branches := strings.Split(response, "\n")
-		impl.logger.Info(branches)
+		impl.logger.Infow("total branch available in git repo", "branches", branches)
 		branch := ""
 		for _, item := range branches {
 			if strings.TrimSpace(item) == "origin/master" {
@@ -120,15 +120,20 @@ func (impl *GitCliUtil) Clone(rootDir string, remoteUrl string, username string,
 			}
 		}
 		if len(branch) == 0 && len(branches) > 0 {
+			impl.logger.Infow("branch1", "branch", branch)
 			branch = strings.ReplaceAll(branches[0], "origin/", "")
 		} else if len(branch) == 0 {
 			// only fetch will work, as we don't have any branch for pull
-			return "", "", nil
+			impl.logger.Infow("branch2", "branch", branch)
+			err = &ApiError{Code: "404", HttpStatusCode: 200, UserMessage: "no branches found"}
+			return "", "", err
 		}
+		impl.logger.Infow("branch", "branch", branch)
 		response, errMsg, err = impl.Pull(rootDir, username, password, branch)
 		if err != nil {
-			impl.logger.Errorw("error on git pull", "branch", branch, "err", err)
-			return "", "", err
+			impl.logger.Errorw("error on git pull", "branch", branch, "errMsg", errMsg, "response", response, "err", err)
+			//return "", "", err
+			return response, "", nil
 		}
 	}
 	return response, errMsg, err

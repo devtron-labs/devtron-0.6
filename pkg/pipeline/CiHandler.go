@@ -26,8 +26,6 @@ import (
 	blob_storage "github.com/devtron-labs/common-lib/blob-storage"
 	bean2 "github.com/devtron-labs/devtron/api/bean"
 	"io/ioutil"
-	errors2 "k8s.io/apimachinery/pkg/api/errors"
-	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -50,7 +48,7 @@ type CiHandler interface {
 	HandleCIWebhook(gitCiTriggerRequest bean.GitCiTriggerRequest) (int, error)
 	HandleCIManual(ciTriggerRequest bean.CiTriggerRequest) (int, error)
 
-	FetchMaterialsByPipelineId(pipelineId int) ([]CiPipelineMaterialResponse, error)
+	FetchMaterialsByPipelineId(pipelineId int, appId int) ([]CiPipelineMaterialResponse, error)
 	FetchWorkflowDetails(appId int, pipelineId int, buildId int) (WorkflowResponse, error)
 
 	//FetchBuildById(appId int, pipelineId int) (WorkflowResponse, error)
@@ -68,7 +66,6 @@ type CiHandler interface {
 	RefreshMaterialByCiPipelineMaterialId(gitMaterialId int) (refreshRes *gitSensor.RefreshGitMaterialResponse, err error)
 	FetchMaterialInfoByArtifactId(ciArtifactId int) (*GitTriggerInfoResponse, error)
 	WriteToCreateTestSuites(pipelineId int, buildId int, triggeredBy int)
-	UpdateCiWorkflowStatusFailure(timeoutForFailureCiBuild int) error
 }
 
 type CiHandlerImpl struct {
@@ -86,14 +83,13 @@ type CiHandlerImpl struct {
 	eventFactory                 client.EventFactory
 	ciPipelineRepository         pipelineConfig.CiPipelineRepository
 	appListingRepository         repository.AppListingRepository
-	K8sUtil                      *util.K8sUtil
+	materialRepo                 pipelineConfig.MaterialRepository
 }
 
 func NewCiHandlerImpl(Logger *zap.SugaredLogger, ciService CiService, ciPipelineMaterialRepository pipelineConfig.CiPipelineMaterialRepository,
 	gitSensorClient gitSensor.GitSensorClient, ciWorkflowRepository pipelineConfig.CiWorkflowRepository, workflowService WorkflowService,
 	ciLogService CiLogService, ciConfig *CiConfig, ciArtifactRepository repository.CiArtifactRepository, userService user.UserService, eventClient client.EventClient,
-	eventFactory client.EventFactory, ciPipelineRepository pipelineConfig.CiPipelineRepository, appListingRepository repository.AppListingRepository,
-	K8sUtil *util.K8sUtil) *CiHandlerImpl {
+	eventFactory client.EventFactory, ciPipelineRepository pipelineConfig.CiPipelineRepository, appListingRepository repository.AppListingRepository, materialRepo pipelineConfig.MaterialRepository) *CiHandlerImpl {
 	return &CiHandlerImpl{
 		Logger:                       Logger,
 		ciService:                    ciService,
@@ -109,7 +105,7 @@ func NewCiHandlerImpl(Logger *zap.SugaredLogger, ciService CiService, ciPipeline
 		eventFactory:                 eventFactory,
 		ciPipelineRepository:         ciPipelineRepository,
 		appListingRepository:         appListingRepository,
-		K8sUtil:                      K8sUtil,
+		materialRepo:                 materialRepo,
 	}
 }
 
@@ -172,9 +168,6 @@ type Trigger struct {
 }
 
 const WorkflowCancel = "CANCELLED"
-const DefaultCiWorkflowNamespace = "devtron-ci"
-const Running = "Running"
-const Starting = "Starting"
 
 func (impl *CiHandlerImpl) HandleCIManual(ciTriggerRequest bean.CiTriggerRequest) (int, error) {
 	impl.Logger.Debugw("HandleCIManual for pipeline ", "PipelineId", ciTriggerRequest.PipelineId)
@@ -265,7 +258,7 @@ func (impl *CiHandlerImpl) RefreshMaterialByCiPipelineMaterialId(gitMaterialId i
 	return refreshRes, err
 }
 
-func (impl *CiHandlerImpl) FetchMaterialsByPipelineId(pipelineId int) ([]CiPipelineMaterialResponse, error) {
+func (impl *CiHandlerImpl) FetchMaterialsByPipelineId(pipelineId int, appId int) ([]CiPipelineMaterialResponse, error) {
 	ciMaterials, err := impl.ciPipelineMaterialRepository.GetByPipelineId(pipelineId)
 	impl.Logger.Infow("Testing Fetch Ci materials by pipeline Id ", "ci materials", ciMaterials)
 	if err != nil {
@@ -276,6 +269,10 @@ func (impl *CiHandlerImpl) FetchMaterialsByPipelineId(pipelineId int) ([]CiPipel
 
 	ciMaterialHistoryMap := make(map[*pipelineConfig.CiPipelineMaterial]*gitSensor.MaterialChangeResp)
 	for _, m := range ciMaterials {
+		// git material should be active in this case
+		if m == nil || m.GitMaterial == nil || !m.GitMaterial.Active {
+			continue
+		}
 		changesRequest := &gitSensor.FetchScmChangesRequest{
 			PipelineMaterialId: m.Id,
 		}
@@ -287,8 +284,11 @@ func (impl *CiHandlerImpl) FetchMaterialsByPipelineId(pipelineId int) ([]CiPipel
 		}
 		ciMaterialHistoryMap[m] = changesResp
 	}
+	gitMaterials, err := impl.materialRepo.FindByAppId(appId)
+	gitMaterialIds := make(map[int]bool)
 
 	for k, v := range ciMaterialHistoryMap {
+		gitMaterialIds[k.GitMaterialId] = true
 		r := CiPipelineMaterialResponse{
 			Id:              k.Id,
 			GitMaterialId:   k.GitMaterialId,
@@ -315,6 +315,7 @@ func (impl *CiHandlerImpl) FetchMaterialsByPipelineId(pipelineId int) ([]CiPipel
 		return []CiPipelineMaterialResponse{}, err
 	}
 	for _, k := range regexMaterials {
+		gitMaterialIds[k.GitMaterialId] = true
 		r := CiPipelineMaterialResponse{
 			Id:              k.Id,
 			GitMaterialId:   k.GitMaterialId,
@@ -334,6 +335,28 @@ func (impl *CiHandlerImpl) FetchMaterialsByPipelineId(pipelineId int) ([]CiPipel
 		if !exists {
 			ciPipelineMaterialResponses = append(ciPipelineMaterialResponses, r)
 		}
+	}
+	//filtering those material which are not configured
+	for _, material := range gitMaterials {
+		if gitMaterialIds[material.Id] {
+			continue
+		}
+		r := CiPipelineMaterialResponse{
+			Id:              0,
+			GitMaterialId:   material.Id,
+			GitMaterialName: material.Name[strings.Index(material.Name, "-")+1:],
+			Type:            "",
+			Value:           "--",
+			Active:          false,
+			GitMaterialUrl:  "",
+			IsRepoError:     false,
+			RepoErrorMsg:    "",
+			IsBranchError:   true,
+			BranchErrorMsg:  "Source not configured",
+			Regex:           "",
+		}
+		responseMap[material.Id] = true
+		ciPipelineMaterialResponses = append(ciPipelineMaterialResponses, r)
 	}
 
 	return ciPipelineMaterialResponses, nil
@@ -1088,6 +1111,11 @@ func (impl *CiHandlerImpl) FetchMaterialInfoByArtifactId(ciArtifactId int) (*Git
 			var history []*gitSensor.GitCommit
 			_gitTrigger := workflow.GitTriggers[m.Id]
 
+			// ignore git trigger which have commit and webhook both data nil
+			if len(_gitTrigger.Commit) == 0 && _gitTrigger.WebhookData.Id == 0 {
+				continue
+			}
+
 			_gitCommit := &gitSensor.GitCommit{
 				Message: _gitTrigger.Message,
 				Author:  _gitTrigger.Author,
@@ -1203,63 +1231,4 @@ func (impl *CiHandlerImpl) listFiles(file *zip.File, payload map[string]interfac
 		}
 	}
 	return payload, nil
-}
-
-func (impl *CiHandlerImpl) UpdateCiWorkflowStatusFailure(timeoutForFailureCiBuild int) error {
-	ciWorkflows, err := impl.ciWorkflowRepository.FindByStatusesIn([]string{Starting, Running})
-	if err != nil {
-		impl.Logger.Errorw("error on fetching ci workflows", "err", err)
-		return err
-	}
-	client, err := impl.K8sUtil.GetClientForInCluster()
-	if err != nil {
-		impl.Logger.Errorw("error while fetching k8s client", "error", err)
-		return err
-	}
-	for _, ciWorkflow := range ciWorkflows {
-		isEligibleToMarkFailed := false
-		if time.Since(ciWorkflow.StartedOn) > (time.Minute * time.Duration(timeoutForFailureCiBuild)) {
-			//check weather pod is exists or not, if exits check its status
-			_, err := impl.workflowService.GetWorkflow(ciWorkflow.Name, DefaultCiWorkflowNamespace)
-			if err != nil {
-				impl.Logger.Warnw("unable to fetch ci workflow", "err", err)
-				statusError, ok := err.(*errors2.StatusError)
-				if ok && statusError.Status().Code == http.StatusNotFound {
-					impl.Logger.Warnw("ci workflow not found", "err", err)
-					isEligibleToMarkFailed = true
-				} else {
-					continue
-					// skip this and process for next ci workflow
-				}
-			}
-
-			//if ci workflow is exists, check its pod
-			if !isEligibleToMarkFailed {
-				_, err = impl.K8sUtil.GetPodByName(DefaultCiWorkflowNamespace, ciWorkflow.PodName, client)
-				if err != nil {
-					impl.Logger.Warnw("unable to fetch ci workflow - pod", "err", err)
-					statusError, ok := err.(*errors2.StatusError)
-					if ok && statusError.Status().Code == http.StatusNotFound {
-						impl.Logger.Warnw("pod not found", "err", err)
-						isEligibleToMarkFailed = true
-					} else {
-						continue
-						// skip this and process for next ci workflow
-					}
-				}
-			}
-		}
-		if isEligibleToMarkFailed {
-			ciWorkflow.Status = "Failed"
-			ciWorkflow.PodStatus = "Failed"
-			ciWorkflow.Message = "marked failed by job"
-			err := impl.ciWorkflowRepository.UpdateWorkFlow(ciWorkflow)
-			if err != nil {
-				impl.Logger.Errorw("unable to update ci workflow, its eligible to mark failed", "err", err)
-				continue
-				// skip this and process for next ci workflow
-			}
-		}
-	}
-	return nil
 }

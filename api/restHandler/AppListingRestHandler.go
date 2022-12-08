@@ -44,6 +44,7 @@ import (
 	"github.com/devtron-labs/devtron/util/k8s"
 	"github.com/devtron-labs/devtron/util/rbac"
 	"github.com/gorilla/mux"
+	grpc_logging "github.com/grpc-ecosystem/go-grpc-middleware/logging"
 	"go.uber.org/zap"
 	"net/http"
 	"strconv"
@@ -340,8 +341,13 @@ func (handler AppListingRestHandlerImpl) FetchAppDetails(w http.ResponseWriter, 
 		common.WriteJsonResp(w, fmt.Errorf("unauthorized user"), nil, http.StatusForbidden)
 		return
 	}
-	appDetail = handler.fetchResourceTree(w, r, appId, envId, appDetail)
-	common.WriteJsonResp(w, err, appDetail, http.StatusOK)
+	appDetail, err = handler.fetchResourceTree(w, r, appId, envId, appDetail)
+	if err != nil {
+		handler.logger.Errorw("error occurred while fetching resource tree ", "appName", appDetail.AppName, "envName", appDetail.EnvironmentName, "err", err)
+		common.WriteJsonResp(w, err, nil, http.StatusNotFound)
+		return
+	}
+	common.WriteJsonResp(w, nil, appDetail, http.StatusOK)
 }
 
 func (handler AppListingRestHandlerImpl) FetchAppTriggerView(w http.ResponseWriter, r *http.Request) {
@@ -590,7 +596,7 @@ func (handler AppListingRestHandlerImpl) RedirectToLinkouts(w http.ResponseWrite
 	}
 	http.Redirect(w, r, link, http.StatusOK)
 }
-func (handler AppListingRestHandlerImpl) fetchResourceTreeFromInstallAppService(w http.ResponseWriter, r *http.Request, appDetail bean.AppDetailContainer) bean.AppDetailContainer {
+func (handler AppListingRestHandlerImpl) fetchResourceTreeFromInstallAppService(w http.ResponseWriter, r *http.Request, appDetail bean.AppDetailContainer) (bean.AppDetailContainer, error) {
 	rctx := r.Context()
 	cn, _ := w.(http.CloseNotifier)
 	return handler.installedAppService.FetchResourceTree(rctx, cn, &appDetail)
@@ -606,6 +612,20 @@ func (handler AppListingRestHandlerImpl) GetHostUrlsByBatch(w http.ResponseWrite
 		common.WriteJsonResp(w, fmt.Errorf("only one of the appId or installedAppId should be valid appId: %s installedAppId: %s", appIdParam, installedAppIdParam), nil, http.StatusBadRequest)
 		return
 	}
+	token := r.Header.Get("token")
+	if appIdParam != "" {
+		appId, err := strconv.Atoi(appIdParam)
+		if err != nil {
+			handler.logger.Errorw("error in parsing appId from request body", "appId", appIdParam, "err", err)
+			common.WriteJsonResp(w, fmt.Errorf("error in parsing appId : %s must be integer", appIdParam), nil, http.StatusBadRequest)
+			return
+		}
+		object := handler.enforcerUtil.GetAppRBACNameByAppId(appId)
+		if ok := handler.enforcer.Enforce(token, casbin.ResourceApplications, casbin.ActionGet, object); !ok {
+			common.WriteJsonResp(w, fmt.Errorf("unauthorized user"), nil, http.StatusForbidden)
+			return
+		}
+	}
 	var appDetail bean.AppDetailContainer
 	var appId, envId int
 	envId, err := strconv.Atoi(envIdParam)
@@ -614,7 +634,7 @@ func (handler AppListingRestHandlerImpl) GetHostUrlsByBatch(w http.ResponseWrite
 		common.WriteJsonResp(w, fmt.Errorf("error in parsing envId : %s must be integer", envIdParam), nil, http.StatusBadRequest)
 		return
 	}
-	appDetail, err = handler.getAppDetails(appIdParam, installedAppIdParam, envId)
+	appDetail, err, appId = handler.getAppDetails(appIdParam, installedAppIdParam, envId)
 	if err != nil {
 		handler.logger.Errorw("error occurred while getting app details", "appId", appIdParam, "installedAppId", installedAppIdParam, "envId", envId)
 		common.WriteJsonResp(w, err, nil, http.StatusBadRequest)
@@ -629,17 +649,25 @@ func (handler AppListingRestHandlerImpl) GetHostUrlsByBatch(w http.ResponseWrite
 		return
 	}
 	//check user authorization for this app
-	token := r.Header.Get("token")
-	object := handler.enforcerUtil.GetAppRBACNameByAppId(appId)
-	if ok := handler.enforcer.Enforce(token, casbin.ResourceApplications, casbin.ActionGet, object); !ok {
-		common.WriteJsonResp(w, fmt.Errorf("unauthorized user"), nil, http.StatusForbidden)
-		return
+	if installedAppIdParam != "" {
+		object, object2 := handler.enforcerUtil.GetHelmObjectByAppNameAndEnvId(appDetail.AppName, appDetail.EnvironmentId)
+		ok := handler.enforcer.Enforce(token, casbin.ResourceHelmApp, casbin.ActionGet, object) || handler.enforcer.Enforce(token, casbin.ResourceHelmApp, casbin.ActionGet, object2)
+		if !ok {
+			common.WriteJsonResp(w, fmt.Errorf("unauthorized user"), nil, http.StatusForbidden)
+			return
+		}
 	}
 
 	if installedAppIdParam != "" {
-		appDetail = handler.fetchResourceTreeFromInstallAppService(w, r, appDetail)
+		appDetail, err = handler.fetchResourceTreeFromInstallAppService(w, r, appDetail)
+		if err != nil {
+			handler.logger.Errorw("Error occured while fetching resource tree", "installedAppIdParam", installedAppIdParam, "err", err)
+		}
 	} else {
-		appDetail = handler.fetchResourceTree(w, r, appId, envId, appDetail)
+		appDetail, err = handler.fetchResourceTree(w, r, appId, envId, appDetail)
+		if err != nil {
+			handler.logger.Errorw("Error occured while fetching resource tree", "AppIdParam", appIdParam, "err", err)
+		}
 	}
 
 	resourceTree := appDetail.ResourceTree
@@ -668,26 +696,28 @@ func (handler AppListingRestHandlerImpl) GetHostUrlsByBatch(w http.ResponseWrite
 	common.WriteJsonResp(w, nil, result, http.StatusOK)
 }
 
-func (handler AppListingRestHandlerImpl) getAppDetails(appIdParam, installedAppIdParam string, envId int) (bean.AppDetailContainer, error) {
+func (handler AppListingRestHandlerImpl) getAppDetails(appIdParam, installedAppIdParam string, envId int) (bean.AppDetailContainer, error, int) {
 	var appDetail bean.AppDetailContainer
 	if appIdParam != "" {
 		appId, err := strconv.Atoi(appIdParam)
 		if err != nil {
 			handler.logger.Errorw("error in parsing appId from request body", "appId", appIdParam, "err", err)
-			return appDetail, err
+			return appDetail, err, appId
 		}
-		return handler.appListingService.FetchAppDetails(appId, envId)
+		appDetail, err = handler.appListingService.FetchAppDetails(appId, envId)
+		return appDetail, err, appId
 	}
 
 	appId, err := strconv.Atoi(installedAppIdParam)
 	if err != nil {
 		handler.logger.Errorw("error in parsing installedAppId from request body", "installedAppId", installedAppIdParam, "err", err)
-		return appDetail, err
+		return appDetail, err, appId
 	}
-	return handler.installedAppService.FindAppDetailsForAppstoreApplication(appId, envId)
+	appDetail, err = handler.installedAppService.FindAppDetailsForAppstoreApplication(appId, envId)
+	return appDetail, err, appId
 }
 
-func (handler AppListingRestHandlerImpl) fetchResourceTree(w http.ResponseWriter, r *http.Request, appId int, envId int, appDetail bean.AppDetailContainer) bean.AppDetailContainer {
+func (handler AppListingRestHandlerImpl) fetchResourceTree(w http.ResponseWriter, r *http.Request, appId int, envId int, appDetail bean.AppDetailContainer) (bean.AppDetailContainer, error) {
 	if len(appDetail.AppName) > 0 && len(appDetail.EnvironmentName) > 0 && util.IsAcdApp(appDetail.DeploymentAppType) {
 		//RBAC enforcer Ends
 		acdAppName := appDetail.AppName + "-" + appDetail.EnvironmentName
@@ -709,21 +739,27 @@ func (handler AppListingRestHandlerImpl) fetchResourceTree(w http.ResponseWriter
 		if err != nil {
 			handler.logger.Errorw("error in getting acd token", "err", err)
 			common.WriteJsonResp(w, err, "", http.StatusInternalServerError)
-			return appDetail
+			return appDetail, err
 		}
 		ctx = context.WithValue(ctx, "token", acdToken)
 		start := time.Now()
 		resp, err := handler.application.ResourceTree(ctx, query)
 		elapsed := time.Since(start)
+
 		if err != nil {
+			userMessage := "Error fetching detail, if you have recently created this deployment pipeline please try after sometime."
+			errCode := grpc_logging.DefaultErrorToCode(err)
+			if errCode == util.ErrorGrpcNotFound {
+				userMessage = "App details not found,release deleted from " + appDetail.DeploymentAppType
+			}
 			handler.logger.Errorw("service err, FetchAppDetails, resource tree", "err", err, "app", appId, "env", envId)
 			err = &util.ApiError{
 				Code:            constants.AppDetailResourceTreeNotFound,
 				InternalMessage: "app detail fetched, failed to get resource tree from acd",
-				UserMessage:     "Error fetching detail, if you have recently created this deployment pipeline please try after sometime.",
+				UserMessage:     userMessage,
 			}
-			common.WriteJsonResp(w, err, "", http.StatusInternalServerError)
-			return appDetail
+			//common.WriteJsonResp(w, err, "", http.StatusNotFound)
+			return appDetail, err
 		}
 		if resp.Status == string(health.HealthStatusHealthy) {
 			status, err := handler.appListingService.ISLastReleaseStopType(appId, envId)
@@ -744,7 +780,6 @@ func (handler AppListingRestHandlerImpl) fetchResourceTree(w http.ResponseWriter
 			}
 		}
 		appDetail.ResourceTree = util2.InterfaceToMapAdapter(resp)
-		handler.logger.Debugw("application environment status", "appId", appId, "envId", envId, "resp", resp)
 		if resp.Status == string(health.HealthStatusHealthy) {
 			err = handler.cdApplicationStatusUpdateHandler.SyncPipelineStatusForResourceTreeCall(acdAppName, appId, envId)
 			if err != nil {
@@ -763,7 +798,18 @@ func (handler AppListingRestHandlerImpl) fetchResourceTree(w http.ResponseWriter
 		}
 		detail, err := handler.helmAppClient.GetAppDetail(context.Background(), req)
 		if err != nil {
+			userMessage := "Apps details not found ,failed to fetch from " + appDetail.DeploymentAppType
+			errCode := grpc_logging.DefaultErrorToCode(err)
+			if errCode == util.ErrorGrpcNotFound || errCode == util.ErrorGrpcUnKnown {
+				userMessage = "App details not found,release deleted from " + appDetail.DeploymentAppType
+			}
 			handler.logger.Errorw("error in fetching app detail", "err", err)
+			err = &util.ApiError{
+				Code:            constants.AppDetailResourceTreeNotFound,
+				InternalMessage: "app detail failed to fetch from helm",
+				UserMessage:     userMessage,
+			}
+			//common.WriteJsonResp(w, err, "", http.StatusNotFound)
 		}
 		if detail != nil {
 			resourceTree := util2.InterfaceToMapAdapter(detail.ResourceTreeResponse)
@@ -773,11 +819,12 @@ func (handler AppListingRestHandlerImpl) fetchResourceTree(w http.ResponseWriter
 		} else {
 			appDetail.ResourceTree = map[string]interface{}{}
 		}
+		return appDetail, err
 	} else {
 		appDetail.ResourceTree = map[string]interface{}{}
 		handler.logger.Warnw("appName and envName not found - avoiding resource tree call", "app", appDetail.AppName, "env", appDetail.EnvironmentName)
 	}
-	return appDetail
+	return appDetail, nil
 }
 
 func (handler AppListingRestHandlerImpl) ManualSyncAcdPipelineDeploymentStatus(w http.ResponseWriter, r *http.Request) {

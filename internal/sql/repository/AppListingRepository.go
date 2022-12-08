@@ -45,13 +45,10 @@ type AppListingRepository interface {
 	PrometheusApiByEnvId(id int) (*string, error)
 
 	FetchOtherEnvironment(appId int) ([]*bean.Environment, error)
-	FetchAllActiveInstalledAppsWithAppIdAndName() ([]AppNameTypeIdContainerDBResponse, error)
-	FetchAllActiveDevtronAppsWithAppIdAndName() ([]AppNameTypeIdContainerDBResponse, error)
 	SaveNewDeployment(deploymentStatus *DeploymentStatus, tx *pg.Tx) error
 	SaveNewDeploymentsWithTxn(deploymentStatuses []DeploymentStatus, tx *pg.Tx) error
-	FindLastDeployedStatusByAppName(appName string) (DeploymentStatus, error)
-	FindLastDeployedStatusForAcdPipelineByAppIdAndEnvId(appId, envId int) (DeploymentStatus, error)
-	FindLastDeployedStatusesByAppNames(appNames []string) ([]DeploymentStatus, error)
+	FindLastDeployedStatus(appName string) (DeploymentStatus, error)
+	FindLastDeployedStatuses(appNames []string) ([]DeploymentStatus, error)
 	FindLastDeployedStatusesForAllApps() ([]DeploymentStatus, error)
 	FindLatestDeployedStatusesForAppsByStatusAndLastUpdatedBefore(deployedBeforeMinutes int) ([]DeploymentStatus, error)
 	DeploymentDetailByArtifactId(ciArtifactId int) (bean.DeploymentDetailContainer, error)
@@ -84,30 +81,6 @@ type AppListingRepositoryImpl struct {
 
 func NewAppListingRepositoryImpl(Logger *zap.SugaredLogger, dbConnection *pg.DB, appListingRepositoryQueryBuilder helper.AppListingRepositoryQueryBuilder) *AppListingRepositoryImpl {
 	return &AppListingRepositoryImpl{dbConnection: dbConnection, Logger: Logger, appListingRepositoryQueryBuilder: appListingRepositoryQueryBuilder}
-}
-
-func (impl AppListingRepositoryImpl) FetchAllActiveInstalledAppsWithAppIdAndName() ([]AppNameTypeIdContainerDBResponse, error) {
-	impl.Logger.Debug("reached at Fetch All Active Installed Apps With AppId And Name")
-	var apps []AppNameTypeIdContainerDBResponse
-	query := "select installed_apps.id,app.app_name " + "from app INNER JOIN installed_apps  on app.id = installed_apps.app_id where app.active=true;"
-	_, err := impl.dbConnection.Query(&apps, query)
-	if err != nil {
-		impl.Logger.Errorw("error while fetching installed apps With AppId And Name")
-		return apps, err
-	}
-	return apps, nil
-}
-
-func (impl AppListingRepositoryImpl) FetchAllActiveDevtronAppsWithAppIdAndName() ([]AppNameTypeIdContainerDBResponse, error) {
-	impl.Logger.Debug("reached at Fetch All Active Devtron Apps With AppId And Name:")
-	var apps []AppNameTypeIdContainerDBResponse
-	query := "select id,app_name " + "from app where app_store=false and active=true;"
-	_, err := impl.dbConnection.Query(&apps, query)
-	if err != nil {
-		impl.Logger.Errorw("error while fetching active Devtron apps With AppId And Name")
-		return apps, err
-	}
-	return apps, nil
 }
 
 /*
@@ -193,7 +166,7 @@ func (impl AppListingRepositoryImpl) DeploymentDetailsByAppIdAndEnvId(appId int,
 	var deploymentDetail bean.DeploymentDetailContainer
 	query := "SELECT env.environment_name, a.app_name, ceco.namespace, u.email_id as last_deployed_by" +
 		" , cia.material_info as material_info_json_string, pco.created_on AS last_deployed_time, pco.pipeline_release_counter as release_version" +
-		" , env.default, cia.data_source, p.pipeline_name as last_deployed_pipeline, cia.id as ci_artifact_id, p.deployment_app_type" +
+		" , env.default, cia.data_source, p.pipeline_name as last_deployed_pipeline, cia.id as ci_artifact_id, p.deployment_app_type, p.ci_pipeline_id" +
 		" FROM chart_env_config_override ceco" +
 		" INNER JOIN environment env ON env.id=ceco.target_environment" +
 		" INNER JOIN pipeline_config_override pco ON pco.env_config_override_id = ceco.id" +
@@ -473,12 +446,13 @@ func (impl AppListingRepositoryImpl) FetchOtherEnvironment(appId int) ([]*bean.E
 
 	// other environment tab
 	var otherEnvironments []*bean.Environment
-	query := "SELECT p.environment_id,env.environment_name, env_app_m.app_metrics, env.default as prod, env_app_m.infra_metrics from pipeline p" +
+	query := "SELECT p.environment_id,env.environment_name, p.last_deployed,  env_app_m.app_metrics, env.default as prod, env_app_m.infra_metrics from" +
+		" (SELECT pl.id,pl.app_id,pl.environment_id,pl.deleted,MAX(pco.created_on) as last_deployed from pipeline pl LEFT JOIN pipeline_config_override pco on pco.pipeline_id = pl.id WHERE pl.app_id=? and pl.deleted = FALSE GROUP BY pl.id) p" +
 		" INNER JOIN environment env on env.id=p.environment_id" +
 		" LEFT JOIN env_level_app_metrics env_app_m on env.id=env_app_m.env_id and p.app_id = env_app_m.app_id" +
-		" where p.app_id=? and p.deleted = FALSE AND env.active = TRUE GROUP by 1,2,3,4, 5"
+		" where p.app_id=? and p.deleted = FALSE AND env.active = TRUE GROUP BY 1,2,3,4,5,6"
 	impl.Logger.Debugw("other env query:", query)
-	_, err := impl.dbConnection.Query(&otherEnvironments, query, appId)
+	_, err := impl.dbConnection.Query(&otherEnvironments, query, appId, appId)
 	if err != nil {
 		impl.Logger.Error("error in fetching other environment", "error", err)
 	}
@@ -495,7 +469,7 @@ func (impl AppListingRepositoryImpl) SaveNewDeploymentsWithTxn(deploymentStatuse
 	return err
 }
 
-func (impl AppListingRepositoryImpl) FindLastDeployedStatusByAppName(appName string) (DeploymentStatus, error) {
+func (impl AppListingRepositoryImpl) FindLastDeployedStatus(appName string) (DeploymentStatus, error) {
 	var deployment DeploymentStatus
 	err := impl.dbConnection.Model(&deployment).
 		Where("app_name = ?", appName).
@@ -505,21 +479,7 @@ func (impl AppListingRepositoryImpl) FindLastDeployedStatusByAppName(appName str
 	return deployment, err
 }
 
-func (impl AppListingRepositoryImpl) FindLastDeployedStatusForAcdPipelineByAppIdAndEnvId(appId, envId int) (DeploymentStatus, error) {
-	var deployment DeploymentStatus
-	err := impl.dbConnection.Model(&deployment).
-		Join("pipeline p on p.app_id=deployment_status.app_id").
-		Where("p.deleted = ?", false).
-		Where("p.deployment_app_type='argo_cd'").
-		Where("deployment_status.app_id = ?", appId).
-		Where("deployment_status.env_id = ?", envId).
-		Order("id Desc").
-		Limit(1).
-		Select()
-	return deployment, err
-}
-
-func (impl AppListingRepositoryImpl) FindLastDeployedStatusesByAppNames(appNames []string) ([]DeploymentStatus, error) {
+func (impl AppListingRepositoryImpl) FindLastDeployedStatuses(appNames []string) ([]DeploymentStatus, error) {
 	if len(appNames) == 0 {
 		return []DeploymentStatus{}, nil
 	}

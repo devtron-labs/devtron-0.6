@@ -37,13 +37,15 @@ const (
 type AppIdentifier int
 
 const (
-	CLUSTER AppIdentifier = iota
-	DEVTRON_APP
-	DEVTRON_INSTALLED_APP
-	EXTERNAL_HELM_APP
+	APP                   AppIdentifier = -1
+	CLUSTER               AppIdentifier = 0
+	DEVTRON_APP           AppIdentifier = 1
+	DEVTRON_INSTALLED_APP AppIdentifier = 2
+	EXTERNAL_HELM_APP     AppIdentifier = 3
 )
 
-var typeMappings = map[string]AppIdentifier{
+var TypeMappings = map[string]AppIdentifier{
+	"app":                   APP,
 	"cluster":               CLUSTER,
 	"devtron-app":           DEVTRON_APP,
 	"devtron-installed-app": DEVTRON_INSTALLED_APP,
@@ -53,7 +55,7 @@ var typeMappings = map[string]AppIdentifier{
 type ExternalLinkService interface {
 	Create(requests []*ExternalLinkDto, userId int32, userRole string) (*ExternalLinkApiResponse, error)
 	GetAllActiveTools() ([]ExternalLinkMonitoringToolDto, error)
-	FetchAllActiveLinksByLinkIdentifier(linkIdentifier *LinkIdentifier, clusterId int, userRole string, userId int) ([]*ExternalLinkDto, error)
+	FetchAllActiveLinksByLinkIdentifier(linkIdentifier *LinkIdentifier, clusterId int) ([]*ExternalLinkDto, error)
 	Update(request *ExternalLinkDto, userRole string) (*ExternalLinkApiResponse, error)
 	DeleteLink(id int, userId int32, userRole string) (*ExternalLinkApiResponse, error)
 }
@@ -95,7 +97,7 @@ type ExternalLinkApiResponse struct {
 }
 
 func getType(identifier AppIdentifier) string {
-	for key, val := range typeMappings {
+	for key, val := range TypeMappings {
 		if val == identifier {
 			return key
 		}
@@ -120,8 +122,15 @@ func (impl ExternalLinkServiceImpl) Create(requests []*ExternalLinkDto, userId i
 		impl.logger.Errorw("error in establishing connection", "err", err)
 		return nil, err
 	}
+	apiError := &util.ApiError{
+		InternalMessage: "external link failed to create ",
+		UserMessage:     "external link failed to create ",
+	}
 	// Rollback tx on error.
 	defer tx.Rollback()
+	externalLinksCreateUpdateResponse := &ExternalLinkApiResponse{
+		Success: false,
+	}
 	for _, request := range requests {
 		//if user is admin make isEditable true ,else if user is sup_adm get it from request
 		if userRole == ADMIN_ROLE {
@@ -140,36 +149,35 @@ func (impl ExternalLinkServiceImpl) Create(requests []*ExternalLinkDto, userId i
 		err := impl.externalLinkRepository.Save(externalLink, tx)
 		if err != nil {
 			impl.logger.Errorw("error in saving link", "data", externalLink, "err", err)
-			err = &util.ApiError{
-				InternalMessage: "external link failed to create in db",
-				UserMessage:     "external link failed to create in db",
-			}
-			return nil, err
+			return externalLinksCreateUpdateResponse, apiError
 		}
 		//for all identifiers, check if it is clusterLevel/appLevel
 		//if appLevel, get type and identifier else get clusterId
 		//save it in external_link_type_mapping table
 		linkType := request.Type
+		if linkType == APP_LEVEL_LINK && len(request.Identifiers) == 0 {
+			identifier := LinkIdentifier{
+				Type: getType(APP),
+			}
+			request.Identifiers = append(request.Identifiers, identifier)
+		}
 		for _, linkIdentifier := range request.Identifiers {
 			if linkType == CLUSTER_LEVEL_LINK {
 				linkIdentifier.Type = getType(CLUSTER)
 				linkIdentifier.Identifier = ""
 			} else if linkType == APP_LEVEL_LINK {
-				if linkIdentifier.Type == getType(DEVTRON_APP) || linkIdentifier.Type == getType(DEVTRON_INSTALLED_APP) {
-					appId, err := strconv.Atoi(linkIdentifier.Identifier)
-					if err != nil {
-						impl.logger.Errorw("error while parsing appId", "appId", appId, "err", err)
-						return nil, err
-					}
-					linkIdentifier.AppId = appId
+				err = impl.updateLinkIdentifier(&linkIdentifier)
+				if err != nil {
+					return externalLinksCreateUpdateResponse, apiError
 				}
 				linkIdentifier.ClusterId = 0
 			} else {
-				return nil, fmt.Errorf("link is neither app level or cluster level")
+				impl.logger.Errorw("link is neither app level or cluster level", "LinkType", request.Type)
+				return externalLinksCreateUpdateResponse, apiError
 			}
 			externalLinkIdentifierMapping := &ExternalLinkIdentifierMapping{
 				ExternalLinkId: externalLink.Id,
-				Type:           typeMappings[linkIdentifier.Type],
+				Type:           TypeMappings[linkIdentifier.Type],
 				Identifier:     linkIdentifier.Identifier,
 				AppId:          linkIdentifier.AppId,
 				ClusterId:      linkIdentifier.ClusterId,
@@ -180,10 +188,10 @@ func (impl ExternalLinkServiceImpl) Create(requests []*ExternalLinkDto, userId i
 			if err != nil {
 				impl.logger.Errorw("error in saving external-link-identifier-mappings", "data", externalLinkIdentifierMapping, "err", err)
 				err = &util.ApiError{
-					InternalMessage: "external-link-identifier-mapping failed to create in db",
-					UserMessage:     "external-link-identifier-mapping failed to create in db",
+					InternalMessage: "external-link-identifier-mapping failed to create ",
+					UserMessage:     "external-link-identifier-mapping failed to create ",
 				}
-				return nil, err
+				return externalLinksCreateUpdateResponse, err
 			}
 		}
 	}
@@ -191,9 +199,7 @@ func (impl ExternalLinkServiceImpl) Create(requests []*ExternalLinkDto, userId i
 	if err != nil {
 		return nil, err
 	}
-	externalLinksCreateUpdateResponse := &ExternalLinkApiResponse{
-		Success: true,
-	}
+	externalLinksCreateUpdateResponse.Success = true
 	return externalLinksCreateUpdateResponse, nil
 }
 
@@ -201,6 +207,10 @@ func (impl ExternalLinkServiceImpl) GetAllActiveTools() ([]ExternalLinkMonitorin
 	tools, err := impl.externalLinkMonitoringToolRepository.FindAllActive()
 	if err != nil {
 		impl.logger.Errorw("error in fetch all tools", "err", err)
+		err = &util.ApiError{
+			InternalMessage: "external-link-identifier-mapping failed to getting tools ",
+			UserMessage:     "external-link-identifier-mapping failed to getting tools ",
+		}
 		return nil, err
 	}
 	var response []ExternalLinkMonitoringToolDto
@@ -215,12 +225,22 @@ func (impl ExternalLinkServiceImpl) GetAllActiveTools() ([]ExternalLinkMonitorin
 	}
 	return response, err
 }
-func (impl ExternalLinkServiceImpl) FindAllActiveByLinkIdentifierByJoin(linkIdentifier *LinkIdentifier, clusterId int) ([]*ExternalLinkDto, error) {
-	records, err := impl.externalLinkIdentifierMappingRepository.FindAllActiveByLinkIdentifier(linkIdentifier, clusterId)
-	if err != nil && err != pg.ErrNoRows {
-		impl.logger.Errorw("error while fetching external links from external_links_identifier mappings table", "err", err)
-		return nil, err
+func (impl ExternalLinkServiceImpl) isGlobalLink(record ExternalLinkIdentifierMappingData) bool {
+	return (record.Type == CLUSTER || record.Type == APP) && record.Identifier == "" && record.AppId == 0 && record.ClusterId == 0
+}
+func (impl ExternalLinkServiceImpl) updateLinkIdentifier(linkIdentifier *LinkIdentifier) error {
+	if linkIdentifier.Type == getType(DEVTRON_APP) || linkIdentifier.Type == getType(DEVTRON_INSTALLED_APP) {
+		appId, err := strconv.Atoi(linkIdentifier.Identifier)
+		if err != nil {
+			impl.logger.Errorw("error while parsing appId", "appId", appId, "err", err)
+			return err
+		}
+		linkIdentifier.AppId = appId
+		linkIdentifier.Identifier = ""
 	}
+	return nil
+}
+func (impl ExternalLinkServiceImpl) processResult(records []ExternalLinkIdentifierMappingData) ([]*ExternalLinkDto, error) {
 	var externalLinkResponse = make([]*ExternalLinkDto, 0)
 	responseMap := make(map[int]*ExternalLinkDto)
 	for _, record := range records {
@@ -235,95 +255,120 @@ func (impl ExternalLinkServiceImpl) FindAllActiveByLinkIdentifierByJoin(linkIden
 				IsEditable:       record.IsEditable,
 				Description:      record.Description,
 				Identifiers:      []LinkIdentifier{},
+				UpdatedOn:        record.UpdatedOn,
 			}
 			responseMap[externalLinkDto.Id] = externalLinkDto
 		}
-		identifier := LinkIdentifier{
-			Type:       getType(record.Type),
-			Identifier: record.Identifier,
-			AppId:      record.AppId,
-			ClusterId:  record.ClusterId,
+
+		if impl.isGlobalLink(record) {
+			responseMap[record.Id].Type = CLUSTER_LEVEL_LINK
+			if record.Type == APP {
+				responseMap[record.Id].Type = APP_LEVEL_LINK
+			}
+		} else {
+			if record.Type == DEVTRON_APP || record.Type == DEVTRON_INSTALLED_APP {
+				record.Identifier = fmt.Sprintf("%d", record.AppId)
+			}
+			identifier := LinkIdentifier{
+				Type:       getType(record.Type),
+				Identifier: record.Identifier,
+				AppId:      record.AppId,
+				ClusterId:  record.ClusterId,
+			}
+			if identifier.Type == getType(CLUSTER) {
+				responseMap[record.Id].Type = CLUSTER_LEVEL_LINK
+			} else {
+				responseMap[record.Id].Type = APP_LEVEL_LINK
+			}
+			responseMap[record.Id].Identifiers = append(responseMap[record.Id].Identifiers, identifier)
 		}
-		responseMap[record.Id].Identifiers = append(responseMap[record.Id].Identifiers, identifier)
+
 	}
 	for _, res := range responseMap {
 		externalLinkResponse = append(externalLinkResponse, res)
 	}
 	return externalLinkResponse, nil
 }
-func (impl ExternalLinkServiceImpl) processResult(allActiveExternalLinkMappings []ExternalLinkIdentifierMapping) []*ExternalLinkDto {
-	var externalLinkResponse = make([]*ExternalLinkDto, 0)
-	response := make(map[int]*ExternalLinkDto)
-	for _, link := range allActiveExternalLinkMappings {
-		if _, ok := response[link.ExternalLinkId]; !ok {
-			response[link.ExternalLinkId] = &ExternalLinkDto{
-				Id:               link.ExternalLinkId,
-				Name:             link.ExternalLink.Name,
-				Url:              link.ExternalLink.Url,
-				IsEditable:       link.ExternalLink.IsEditable,
-				Description:      link.ExternalLink.Description,
-				Active:           link.ExternalLink.Active,
-				MonitoringToolId: link.ExternalLink.ExternalLinkMonitoringToolId,
-				UpdatedOn:        link.UpdatedOn,
-			}
-		}
-		var identifier = LinkIdentifier{}
-		if link.ClusterId > 0 {
-			response[link.ExternalLinkId].Type = CLUSTER_LEVEL_LINK
-			identifier.ClusterId = link.ClusterId
-			identifier.Type = getType(CLUSTER)
-			identifier.Identifier = ""
-		} else {
-			response[link.ExternalLinkId].Type = APP_LEVEL_LINK
-			identifier.ClusterId = 0
-			identifier.Type = getType(link.Type)
-			identifier.Identifier = link.Identifier
-		}
-		response[link.ExternalLinkId].Identifiers = append(response[link.ExternalLinkId].Identifiers, identifier)
+func (impl ExternalLinkServiceImpl) appendAllClusterLinks(records []ExternalLinkIdentifierMappingData) ([]ExternalLinkIdentifierMappingData, error) {
+	links, err := impl.externalLinkRepository.FindAllClusterLinks()
+	if err != nil {
+		impl.logger.Errorw("error while fetching all cluster links")
+		return records, err
 	}
-	for _, externalLink := range response {
-		externalLinkResponse = append(externalLinkResponse, externalLink)
+	for _, link := range links {
+		record := ExternalLinkIdentifierMappingData{
+			Id:                           link.Id,
+			Type:                         CLUSTER,
+			ExternalLinkMonitoringToolId: link.ExternalLinkMonitoringToolId,
+			Name:                         link.Name,
+			Url:                          link.Url,
+			Description:                  link.Description,
+			IsEditable:                   link.IsEditable,
+			UpdatedOn:                    link.UpdatedOn,
+		}
+		records = append(records, record)
 	}
-	return externalLinkResponse
+	return records, nil
 }
-func (impl ExternalLinkServiceImpl) FetchAllActiveLinksByLinkIdentifier(linkIdentifier *LinkIdentifier, clusterId int, userRole string, userId int) ([]*ExternalLinkDto, error) {
+func (impl ExternalLinkServiceImpl) FetchAllActiveLinksByLinkIdentifier(linkIdentifier *LinkIdentifier, clusterId int) ([]*ExternalLinkDto, error) {
 	//linkIdentifier and clusterId nil and 0 respectively to fetch links at global level(get all active links)
 	//linkIdentifier and clusterId passed to get all active links for a particular app(linkIdentifier.ClusterId will be 0)
-	var allActiveExternalLinkMappings []ExternalLinkIdentifierMapping
 	var err error
+	apiError := &util.ApiError{
+		InternalMessage: "external-link-identifier-mapping failed to fetching external links  ",
+		UserMessage:     "external-link-identifier-mapping failed to fetching external links  ",
+	}
 	if linkIdentifier == nil {
-		if userRole != SUPER_ADMIN_ROLE {
-			impl.logger.Debugw("user is not super_admin", "userId", userId, "userRole", userRole)
-			return nil, fmt.Errorf("user role is not super_admin")
-		}
-		allActiveExternalLinkMappings, err = impl.externalLinkIdentifierMappingRepository.FindAllActive()
+		records, err := impl.externalLinkIdentifierMappingRepository.FindAllActiveLinkIdentifierData()
 		if err != nil && err != pg.ErrNoRows {
 			impl.logger.Errorw("error while fetching external links from external_links_identifier mappings table", "err", err)
+			err = apiError
 			return nil, err
 		}
-		return impl.processResult(allActiveExternalLinkMappings), err
+		records, err = impl.appendAllClusterLinks(records)
+		if err != nil && err != pg.ErrNoRows {
+			impl.logger.Errorw("error while fetching external links from external_links_identifier mappings table", "err", err)
+			err = apiError
+			return nil, err
+		}
+		return impl.processResult(records)
 	}
 
-	if linkIdentifier.Type == getType(DEVTRON_APP) || linkIdentifier.Type == getType(DEVTRON_INSTALLED_APP) {
-		appId, err := strconv.Atoi(linkIdentifier.Identifier)
-		if err != nil {
-			impl.logger.Errorw("error while parsing appId", "appId", appId, "err", err)
-			return nil, err
-		}
-		linkIdentifier.AppId = appId
+	err = impl.updateLinkIdentifier(linkIdentifier)
+	if err != nil {
+		return nil, apiError
 	}
 	linkIdentifier.ClusterId = 0
-	res, err := impl.FindAllActiveByLinkIdentifierByJoin(linkIdentifier, clusterId)
-	return res, err
+	records, err := impl.externalLinkIdentifierMappingRepository.FindAllActiveByLinkIdentifier(linkIdentifier, clusterId)
+	if err != nil && err != pg.ErrNoRows {
+		impl.logger.Errorw("error while fetching external links from external_links_identifier mappings table", "err", err)
+		err = apiError
+		return nil, err
+	}
+	records, err = impl.appendAllClusterLinks(records)
+	if err != nil && err != pg.ErrNoRows {
+		impl.logger.Errorw("error while fetching external links from external_links_identifier mappings table", "err", err)
+		err = apiError
+		return nil, err
+	}
+	return impl.processResult(records)
 }
 
 func (impl ExternalLinkServiceImpl) Update(request *ExternalLinkDto, userRole string) (*ExternalLinkApiResponse, error) {
 	impl.logger.Debugw("link update request", "req", request)
 	dbConnection := impl.externalLinkRepository.GetConnection()
 	tx, err := dbConnection.Begin()
+	externalLinksCreateUpdateResponse := &ExternalLinkApiResponse{
+		Success: false,
+	}
+	apiError := &util.ApiError{
+		InternalMessage: "external-link-identifier-mapping failed to updating external link  ",
+		UserMessage:     "external-link-identifier-mapping failed to updating external link  ",
+	}
 	if err != nil {
 		impl.logger.Errorw("error in establishing connection", "err", err)
-		return nil, err
+		err = apiError
+		return externalLinksCreateUpdateResponse, err
 	}
 
 	// Rollback tx on error.
@@ -333,46 +378,59 @@ func (impl ExternalLinkServiceImpl) Update(request *ExternalLinkDto, userRole st
 		impl.logger.Errorw("No matching entry found for update.", "id", request.Id)
 		msg := "no row found for external link	"
 		err = &util.ApiError{InternalMessage: msg, UserMessage: msg}
-		return nil, err0
+		return externalLinksCreateUpdateResponse, err0
 	}
 	if userRole == ADMIN_ROLE && !externalLink.IsEditable {
 		impl.logger.Infow("app admin not allowed to update or delete the external link", "external-link-id", externalLink.Id, "user-id", request.UserId)
-		return nil, fmt.Errorf("user not allowed to perform update or delete")
+		err = &util.ApiError{
+			InternalMessage: "external-link-identifier-mapping failed to updating external link ",
+			UserMessage:     "user not allowed to perform update or delete",
+		}
+		return externalLinksCreateUpdateResponse, err
 	}
+
 	externalLink.Name = request.Name
 	externalLink.Url = request.Url
 	externalLink.ExternalLinkMonitoringToolId = request.MonitoringToolId
 	externalLink.UpdatedBy = int32(request.UserId)
 	externalLink.UpdatedOn = time.Now()
-	externalLink.IsEditable = request.IsEditable
+	if userRole == SUPER_ADMIN_ROLE {
+		externalLink.IsEditable = request.IsEditable
+	} else {
+		externalLink.IsEditable = true
+	}
 	externalLink.Description = request.Description
 	err = impl.externalLinkRepository.Update(&externalLink, tx)
 	if err != nil {
 		impl.logger.Errorw("error in updating link", "data", externalLink, "err", err)
-		return nil, err
+		err = apiError
+		return externalLinksCreateUpdateResponse, err
 	}
 
 	allExternalLinksMapping, err := impl.externalLinkIdentifierMappingRepository.FindAllActiveByExternalLinkId(request.Id)
 	if err != nil && err != pg.ErrNoRows {
 		impl.logger.Errorw("error in fetching link", "data", externalLink, "err", err)
-		return nil, err
+		err = apiError
+		return externalLinksCreateUpdateResponse, err
+	}
+	if len(request.Identifiers) == 0 && request.Type == APP_LEVEL_LINK {
+		identifier := LinkIdentifier{
+			Type: getType(APP),
+		}
+		request.Identifiers = append(request.Identifiers, identifier)
 	}
 
 	//make all the existing mappings of this external link inactive
-	for _, model := range allExternalLinksMapping {
-		if model.Active == true {
-			model.Active = false
-			model.UpdatedBy = int32(request.UserId)
-			model.UpdatedOn = time.Now()
-			err := impl.externalLinkIdentifierMappingRepository.Update(model, tx)
-			if err != nil {
-				impl.logger.Errorw("error in updating external_link_identifier mappings to false", "data", model, "err", err)
-				return nil, err
-			}
-		}
+	//update in single update query
+	err = impl.externalLinkIdentifierMappingRepository.UpdateAllActiveToInActive(request.Id, tx)
+	if err != nil && err != pg.ErrNoRows {
+		impl.logger.Errorw("error in fetching link", "data", externalLink, "err", err)
+		err = apiError
+		return externalLinksCreateUpdateResponse, err
 	}
 
 	//store all the external_link_identifier_mappings fetched from db in a set
+
 	requestedLinkIdentifiersMap := make(map[LinkIdentifier]*ExternalLinkIdentifierMapping)
 	for _, model := range allExternalLinksMapping {
 		linkIdentifier := LinkIdentifier{
@@ -387,13 +445,9 @@ func (impl ExternalLinkServiceImpl) Update(request *ExternalLinkDto, userRole st
 	//update if request identifier present in set else save a new record
 	for _, identifier := range request.Identifiers {
 		if request.Type == APP_LEVEL_LINK {
-			if identifier.Type == getType(DEVTRON_APP) || identifier.Type == getType(DEVTRON_INSTALLED_APP) {
-				appId, err := strconv.Atoi(identifier.Identifier)
-				if err != nil {
-					impl.logger.Errorw("error while parsing appId", "appId", appId, "err", err)
-					return nil, err
-				}
-				identifier.AppId = appId
+			err = impl.updateLinkIdentifier(&identifier)
+			if err != nil {
+				return externalLinksCreateUpdateResponse, apiError
 			}
 			identifier.ClusterId = 0
 		} else {
@@ -408,7 +462,7 @@ func (impl ExternalLinkServiceImpl) Update(request *ExternalLinkDto, userRole st
 		} else {
 			externalLinkIdentifier := &ExternalLinkIdentifierMapping{
 				ExternalLinkId: request.Id,
-				Type:           typeMappings[identifier.Type],
+				Type:           TypeMappings[identifier.Type],
 				AppId:          identifier.AppId,
 				EnvId:          identifier.EnvId,
 				Identifier:     identifier.Identifier,
@@ -420,21 +474,15 @@ func (impl ExternalLinkServiceImpl) Update(request *ExternalLinkDto, userRole st
 		}
 		if err != nil {
 			impl.logger.Errorw("error in saving external_link_identifier mapping", "identifier", identifier, "err", err)
-			err = &util.ApiError{
-				InternalMessage: "external_link_identifier mapping failed to create in db",
-				UserMessage:     "external_link_identifier mapping failed to create in db",
-			}
-			return nil, err
+			return externalLinksCreateUpdateResponse, apiError
 		}
 	}
 
 	err = tx.Commit()
 	if err != nil {
-		return nil, err
+		return externalLinksCreateUpdateResponse, err
 	}
-	externalLinksCreateUpdateResponse := &ExternalLinkApiResponse{
-		Success: true,
-	}
+	externalLinksCreateUpdateResponse.Success = true
 	return externalLinksCreateUpdateResponse, nil
 }
 
@@ -442,20 +490,34 @@ func (impl ExternalLinkServiceImpl) DeleteLink(id int, userId int32, userRole st
 	impl.logger.Debugw("external link delete request", "external_link_id", id)
 	dbConnection := impl.externalLinkRepository.GetConnection()
 	tx, err := dbConnection.Begin()
+	externalLinksCreateUpdateResponse := &ExternalLinkApiResponse{
+		Success: false,
+	}
+	apiError := &util.ApiError{
+		InternalMessage: "external_link failed to delete",
+		UserMessage:     "external_link failed to delete",
+	}
 	if err != nil {
 		impl.logger.Errorw("error in establishing connection", "err", err)
-		return nil, err
+		err = apiError
+		return externalLinksCreateUpdateResponse, err
 	}
 	// Rollback tx on error.
 	defer tx.Rollback()
 	// mark the link inactive if user has edit access
 	externalLink, err := impl.externalLinkRepository.FindOne(id)
 	if err != nil {
-		return nil, err
+		impl.logger.Errorw("error occurred in finding the external link", "link-id", id)
+		err = apiError
+		return externalLinksCreateUpdateResponse, err
 	}
 	if userRole == ADMIN_ROLE && !externalLink.IsEditable {
 		impl.logger.Infow("app admin not allowed to update or delete the external link", "external-link-id", externalLink.Id, "user-id", userId)
-		return nil, fmt.Errorf("user not allowed to perform update or delete")
+		err = &util.ApiError{
+			InternalMessage: "external_link failed to delete",
+			UserMessage:     "external_link failed to delete,no permission for user to delete",
+		}
+		return externalLinksCreateUpdateResponse, err
 	}
 	externalLink.Active = false
 	externalLink.UpdatedOn = time.Now()
@@ -463,32 +525,31 @@ func (impl ExternalLinkServiceImpl) DeleteLink(id int, userId int32, userRole st
 	err = impl.externalLinkRepository.Update(&externalLink, tx)
 	if err != nil {
 		impl.logger.Errorw("error in update external link", "data", externalLink, "err", err)
-		return nil, err
+		err = apiError
+		return externalLinksCreateUpdateResponse, err
 	}
 
-	externalLinksClusterMapping, err := impl.externalLinkIdentifierMappingRepository.FindAllActiveByExternalLinkId(id)
+	externalLinkIdentifierMappings, err := impl.externalLinkIdentifierMappingRepository.FindAllActiveByExternalLinkId(id)
 	if err != nil {
-		return nil, err
+		return externalLinksCreateUpdateResponse, err
 	}
 	//mark all the mappings inactive
-	for _, externalLinkMapping := range externalLinksClusterMapping {
+	for _, externalLinkMapping := range externalLinkIdentifierMappings {
 		externalLinkMapping.Active = false
 		externalLinkMapping.UpdatedOn = time.Now()
 		externalLinkMapping.UpdatedBy = userId
 		err := impl.externalLinkIdentifierMappingRepository.Update(externalLinkMapping, tx)
 		if err != nil {
 			impl.logger.Errorw("error in deleting external_link_identifier mappings to false", "data", externalLink, "err", err)
-			return nil, err
+			err = apiError
+			return externalLinksCreateUpdateResponse, err
 		}
 	}
 
 	err = tx.Commit()
 	if err != nil {
-		return nil, err
+		return externalLinksCreateUpdateResponse, err
 	}
-	externalLinksCreateUpdateResponse := &ExternalLinkApiResponse{
-		Success: true,
-	}
-
+	externalLinksCreateUpdateResponse.Success = true
 	return externalLinksCreateUpdateResponse, nil
 }

@@ -107,10 +107,16 @@ type DeploymentDetailContainer struct {
 	CiArtifactId                  int             `json:"ciArtifactId"`
 	ClusterId                     int             `json:"clusterId"`
 	DeploymentAppType             string          `json:"deploymentAppType"`
+	CiPipelineId                  int             `json:"-"`
+	IsExternalCi                  bool            `json:"externalCi"`
+	ClusterName                   string          `json:"clusterName,omitempty"`
+	DockerRegistryId              string          `json:"dockerRegistryId,omitempty"`
+	IpsAccessProvided             bool            `json:"ipsAccessProvided"`
 }
 
 type AppDetailContainer struct {
 	DeploymentDetailContainer `json:",inline"`
+	AppDeleteError            string                 `json:"appDeleteError"`
 	InstanceDetail            []InstanceDetail       `json:"instanceDetail"` //pod list with cpu, memory usage percent
 	Environments              []Environment          `json:"otherEnvironment,omitempty"`
 	LinkOuts                  []LinkOuts             `json:"linkOuts,omitempty"`
@@ -124,6 +130,7 @@ type Environment struct {
 	InfraMetrics    *bool  `json:"infraMetrics"`
 	Prod            bool   `json:"prod"`
 	ChartRefId      int    `json:"chartRefId"`
+	LastDeployed    string `json:"lastDeployed"`
 }
 
 type InstanceDetail struct {

@@ -1,8 +1,8 @@
 package repository
 
 import (
-	"github.com/devtron-labs/devtron/internal/sql/repository"
 	"github.com/devtron-labs/devtron/internal/sql/repository/app"
+	repository2 "github.com/devtron-labs/devtron/internal/sql/repository/dockerRegistry"
 	"github.com/devtron-labs/devtron/pkg/sql"
 	"github.com/go-pg/pg"
 	"go.uber.org/zap"
@@ -28,9 +28,10 @@ type CiTemplateHistory struct {
 	CiBuildConfigId    int      `sql:"ci_build_config_id"`
 	BuildMetaDataType  string   `sql:"build_meta_data_type"`
 	BuildMetadata      string   `sql:"build_metadata"`
+	Trigger            string   `sql:"trigger"`
 	sql.AuditLog
 	App            *app.App
-	DockerRegistry *repository.DockerArtifactStore
+	DockerRegistry *repository2.DockerArtifactStore
 }
 
 type CiTemplateHistoryRepository interface {

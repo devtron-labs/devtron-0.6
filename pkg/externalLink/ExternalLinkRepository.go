@@ -36,11 +36,12 @@ type ExternalLink struct {
 
 type ExternalLinkRepository interface {
 	Save(externalLinks *ExternalLink, tx *pg.Tx) error
-	FindAllActive() ([]ExternalLink, error)
+
 	FindOne(id int) (ExternalLink, error)
 	Update(link *ExternalLink, tx *pg.Tx) error
-	FindAllFilterOutByIds(ids []int) ([]ExternalLink, error)
+
 	GetConnection() *pg.DB
+	FindAllClusterLinks() ([]ExternalLink, error)
 }
 type ExternalLinkRepositoryImpl struct {
 	dbConnection *pg.DB
@@ -56,11 +57,7 @@ func (impl ExternalLinkRepositoryImpl) Save(externalLinks *ExternalLink, tx *pg.
 	err := tx.Insert(externalLinks)
 	return err
 }
-func (impl ExternalLinkRepositoryImpl) FindAllActive() ([]ExternalLink, error) {
-	var links []ExternalLink
-	err := impl.dbConnection.Model(&links).Where("active = ?", true).Select()
-	return links, err
-}
+
 func (impl ExternalLinkRepositoryImpl) Update(link *ExternalLink, tx *pg.Tx) error {
 	err := tx.Update(link)
 	return err
@@ -72,14 +69,14 @@ func (impl ExternalLinkRepositoryImpl) FindOne(id int) (ExternalLink, error) {
 		Where("active = ?", true).Select()
 	return link, err
 }
-func (impl ExternalLinkRepositoryImpl) FindAllFilterOutByIds(ids []int) ([]ExternalLink, error) {
-	if ids == nil || len(ids) == 0 {
-		return impl.FindAllActive()
-	}
-	var links []ExternalLink
-	err := impl.dbConnection.Model(&links).
-		Where("active = ?", true).
-		Where("id not in (?)", pg.In(ids)).
-		Select()
-	return links, err
+
+func (impl ExternalLinkRepositoryImpl) FindAllClusterLinks() ([]ExternalLink, error) {
+	var res []ExternalLink
+	query := " select * " +
+		"from external_link el" +
+		"  where el.id not in" +
+		" (select distinct elim.external_link_id from external_link_identifier_mapping elim where elim.active = true)" +
+		" and el.active = true;"
+	_, err := impl.dbConnection.Query(&res, query)
+	return res, err
 }

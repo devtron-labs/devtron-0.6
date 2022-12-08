@@ -300,12 +300,15 @@ func (impl K8sUtil) GetSecret(namespace string, name string, client *v12.CoreV1C
 	}
 }
 
-func (impl K8sUtil) CreateSecret(namespace string, data map[string][]byte, secretName string, client *v12.CoreV1Client) (*v1.Secret, error) {
+func (impl K8sUtil) CreateSecret(namespace string, data map[string][]byte, secretName string, secretType v1.SecretType, client *v12.CoreV1Client) (*v1.Secret, error) {
 	secret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: secretName,
 		},
 		Data: data,
+	}
+	if len(secretType) > 0 {
+		secret.Type = secretType
 	}
 	secret, err := client.Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{})
 	if err != nil {
@@ -507,5 +510,15 @@ func (impl K8sUtil) GetK8sClusterRestConfig() (*rest.Config, error) {
 			return nil, err
 		}
 		return clusterConfig, nil
+	}
+}
+
+func (impl K8sUtil) GetPodByName(namespace string, name string, client *v12.CoreV1Client) (*v1.Pod, error) {
+	pod, err := client.Pods(namespace).Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		impl.logger.Errorw("error in fetch pod name", "err", err)
+		return nil, err
+	} else {
+		return pod, nil
 	}
 }

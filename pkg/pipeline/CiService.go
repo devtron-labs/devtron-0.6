@@ -91,10 +91,15 @@ func NewCiServiceImpl(Logger *zap.SugaredLogger, workflowService WorkflowService
 	}
 }
 
-const WorkflowStarting = "Starting"
-const WorkflowInProgress = "Progressing"
-const WorkflowAborted = "Aborted"
-const WorkflowFailed = "Failed"
+const (
+	WorkflowStarting           = "Starting"
+	WorkflowInProgress         = "Progressing"
+	WorkflowAborted            = "Aborted"
+	WorkflowFailed             = "Failed"
+	WorkflowSucceeded          = "Succeeded"
+	WorkflowTimedOut           = "TimedOut"
+	WorkflowUnableToFetchState = "UnableToFetch"
+)
 
 func (impl *CiServiceImpl) GetCiMaterials(pipelineId int, ciMaterials []*pipelineConfig.CiPipelineMaterial) ([]*pipelineConfig.CiPipelineMaterial, error) {
 	if !(len(ciMaterials) == 0) {
@@ -296,6 +301,10 @@ func (impl *CiServiceImpl) buildWfRequestForCiPipeline(pipeline *pipelineConfig.
 	var ciProjectDetails []CiProjectDetails
 	commitHashes := trigger.CommitHashes
 	for _, ciMaterial := range ciMaterials {
+		// ignore those materials which have inactive git material
+		if ciMaterial == nil || ciMaterial.GitMaterial == nil || !ciMaterial.GitMaterial.Active {
+			continue
+		}
 		commitHashForPipelineId := commitHashes[ciMaterial.Id]
 		ciProjectDetail := CiProjectDetails{
 			GitRepository:   ciMaterial.GitMaterial.Url,
